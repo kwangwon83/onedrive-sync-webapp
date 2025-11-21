@@ -135,7 +135,7 @@
     (function () {
       if (!("showDirectoryPicker" in window)) {
         alert(
-          "이 브라우저는 File System Access API를 지원하지 않습니다.\\n" +
+          "이 브라우저는 File System Access API를 지원하지 않습니다.\n" +
           "Chrome/Edge 최신 버전에서 http(s) 또는 GitHub Pages URL로 접속해 주세요."
         );
         return;
@@ -145,7 +145,7 @@
 
       function log(msg) {
         const time = new Date().toLocaleTimeString();
-        logEl.textContent += "[" + time + "] " + msg + "\\n";
+        logEl.textContent += "[" + time + "] " + msg + "\n";
         logEl.scrollTop = logEl.scrollHeight;
       }
 
@@ -853,3 +853,4 @@
   </script>
 </body>
 </html>
+
