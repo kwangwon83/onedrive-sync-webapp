@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>OneDrive ↔ 로컬 폴더 동기화 (고급 버전)</title>
+
+  <!-- MSAL.js -->
+  <script
+    type="text/javascript"
+    src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"
+    crossorigin="anonymous">
+  </script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+      margin: 16px;
+      line-height: 1.4;
+    }
+    h1 {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+    .box {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .row { margin-bottom: 8px; }
+    button {
+      padding: 6px 10px;
+      margin-right: 6px;
+      cursor: pointer;
+    }
+    label { cursor: pointer; }
+    input[type="text"] {
+      width: 320px;
+      padding: 4px 6px;
+      box-sizing: border-box;
+    }
+    #log {
+      width: 100%;
+      height: 260px;
+      box-sizing: border-box;
+      background: #111;
+      color: #eee;
+      padding: 8px;
+      border-radius: 6px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-family: "Consolas", "Courier New", monospace;
+      font-size: 12px;
+    }
+    .path-label { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>OneDrive ↔ 로컬 폴더 동기화 (rclone 느낌 웹앱)</h1>
+
+  <div class="box">
+    <div class="row">
+      <button id="loginBtn">Microsoft 로그인</button>
+      <span id="loginInfo" style="font-size: 12px; color: #555;">미로그인</span>
+    </div>
+
+    <div class="row">
+      <label>
+        OneDrive 기준 경로 (예: <code>/Notes</code> 또는 빈칸이면 루트):
+        <br>
+        <input type="text" id="remoteBase" placeholder="/Notes">
+      </label>
+    </div>
+
+    <div class="row">
+      <button id="pickLocal">로컬 기준 폴더 선택</button>
+      <span class="path-label">로컬:</span>
+      <span id="localPath">선택 안 됨</span>
+    </div>
+
+    <div class="row">
+      <label>
+        <input type="radio" name="mode" value="download" checked>
+        다운로드 (OneDrive → 로컬)
+      </label>
+      <label style="margin-left: 12px;">
+        <input type="radio" name="mode" value="upload">
+        업로드 (로컬 → OneDrive)
+      </label>
+    </div>
+
+    <!-- 다운로드 옵션 -->
+    <div class="row" id="downloadOptions">
+      <label>
+        <input type="checkbox" id="mirrorDelete" checked>
+        다운로드 시, 로컬에서 OneDrive에 없는 파일 삭제 (미러링 / rclone sync 원격 로컬)
+      </label>
+    </div>
+
+    <!-- 업로드 옵션 -->
+    <div class="row" id="uploadOptions" style="display:none;">
+      <label>
+        업로드 충돌 정책:
+        <select id="conflictPolicy">
+          <option value="open">open (기존 유지, 바뀐 파일은 건너뜀)</option>
+          <option value="replace">replace (원격 파일 덮어쓰기)</option>
+          <option value="rename">rename (새 파일 이름 바꿔 저장)</option>
+        </select>
+      </label>
+      <div style="font-size: 12px; color: #555; margin-top:4px;">
+        * open: 원격에 같은 경로가 있으면 새 파일은 건너뜀<br>
+        * replace: 원격 파일을 덮어씀<br>
+        * rename: 새 파일을 이름 바꿔서 추가 저장
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="analyzeBtn">변경사항 분석</button>
+      <button id="syncBtn" disabled>동기화 실행</button>
+    </div>
+
+    <div class="row" style="font-size: 12px; color: #555;">
+      * 다운로드 모드: OneDrive 기준으로 로컬을 맞춤 (필요시 로컬 삭제 포함)<br>
+      * 업로드 모드: 로컬 기준으로 OneDrive를 맞춤 (충돌 정책 적용, 기본은 open)
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="row"><strong>로그</strong></div>
+    <pre id="log"></pre>
+  </div>
+
+  <script>
+    (function () {
+      if (!("showDirectoryPicker" in window)) {
+        alert(
+          "이 브라우저는 File System Access API를 지원하지 않습니다.\\n" +
+          "Chrome/Edge 최신 버전에서 http(s) 또는 GitHub Pages URL로 접속해 주세요."
+        );
+        return;
+      }
+
+      // ===== 공통 유틸 =====
+
+      function log(msg) {
+        const time = new Date().toLocaleTimeString();
+        logEl.textContent += "[" + time + "] " + msg + "\\n";
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function normalizeBasePath(basePath) {
+        let bp = (basePath || "").trim();
+        if (bp === "" || bp === "/") return "";
+        if (!bp.startsWith("/")) bp = "/" + bp;
+        if (bp.endsWith("/")) bp = bp.slice(0, -1);
+        return bp;
+      }
+
+      function buildItemFullPath(basePath, relPath) {
+        const bp = normalizeBasePath(basePath);
+        let rp = relPath || "";
+        if (rp && !rp.startsWith("/")) rp = "/" + rp;
+        if (!bp && !rp) {
+          throw new Error("파일 경로가 비어 있습니다.");
+        }
+        return (bp || "") + (rp || "");
+      }
+
+      // ===== DOM =====
+
+      const loginInfoSpan = document.getElementById("loginInfo");
+      const logEl = document.getElementById("log");
+      const remoteBaseInput = document.getElementById("remoteBase");
+      const localPathSpan = document.getElementById("localPath");
+      const mirrorDelete = document.getElementById("mirrorDelete");
+      const analyzeBtn = document.getElementById("analyzeBtn");
+      const syncBtn = document.getElementById("syncBtn");
+      const conflictPolicySelect = document.getElementById("conflictPolicy");
+      const downloadOptions = document.getElementById("downloadOptions");
+      const uploadOptions = document.getElementById("uploadOptions");
+
+      let localRootHandle = null;
+      let syncPlan = null; // {direction, ...}
+      let msalAccount = null;
+      let accessToken = null;
+
+      // ===== MSAL 설정 =====
+
+      const msalConfig = {
+        auth: {
+          clientId: "227e8a77-61b7-4c86-b549-77026bf6cbfc",  // ★ 본인 App 등록 Client ID
+          authority: "https://login.microsoftonline.com/common",
+          redirectUri: "https://kwangwon83.github.io/onedrive-sync-webapp/onedrive_sync_advanced.html"
+          // ↑ 실제 GitHub Pages URL로 교체
+        },
+        cache: {
+          cacheLocation: "localStorage",
+          storeAuthStateInCookie: false
+        }
+      };
+
+      const loginRequest = {
+        scopes: ["Files.ReadWrite"]
+      };
+
+      const msalInstance = new msal.PublicClientApplication(msalConfig);
+
+      async function ensureLogin() {
+        if (msalAccount) return;
+        const accounts = msalInstance.getAllAccounts();
+        if (accounts.length > 0) {
+          msalAccount = accounts[0];
+          loginInfoSpan.textContent = "로그인 유지됨: " + msalAccount.username;
+          return;
+        }
+        const loginRes = await msalInstance.loginPopup(loginRequest);
+        msalAccount = loginRes.account;
+        loginInfoSpan.textContent = "로그인: " + msalAccount.username;
+        log("Microsoft 로그인 성공");
+      }
+
+      async function acquireGraphToken() {
+        await ensureLogin();
+        if (!msalAccount) throw new Error("로그인 안 됨");
+        try {
+          const resp = await msalInstance.acquireTokenSilent({
+            ...loginRequest,
+            account: msalAccount
+          });
+          accessToken = resp.accessToken;
+          return accessToken;
+        } catch (e) {
+          log("silent 토큰 실패, popup으로 재시도: " + e.message);
+          const resp = await msalInstance.acquireTokenPopup(loginRequest);
+          accessToken = resp.accessToken;
+          return accessToken;
+        }
+      }
+
+      async function graphRequest(url, method = "GET", body) {
+        const token = await acquireGraphToken();
+        const res = await fetch(url, {
+          method,
+          headers: {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json"
+          },
+          body
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error("Graph 오류 " + res.status + ": " + text);
+        }
+        return res;
+      }
+
+      // ===== OneDrive 맵 구성 (파일 + 폴더) =====
+
+      async function buildRemoteMaps(basePath) {
+        const files = new Map();
+        const folders = new Map();
+
+        async function walkFolder(apiUrl, pathPrefix) {
+          let url = apiUrl;
+          while (url) {
+            const res = await graphRequest(url);
+            const data = await res.json();
+            const items = data.value || [];
+            for (const item of items) {
+              const name = item.name;
+              const relPath = pathPrefix ? pathPrefix + "/" + name : name;
+              if (item.folder) {
+                folders.set(relPath, item.id);
+                const childrenUrl =
+                  "https://graph.microsoft.com/v1.0/me/drive/items/" +
+                  encodeURIComponent(item.id) +
+                  "/children";
+                await walkFolder(childrenUrl, relPath);
+              } else if (item.file) {
+                files.set(relPath, {
+                  id: item.id,
+                  size: item.size,
+                  mtime: new Date(item.lastModifiedDateTime).getTime()
+                });
+              }
+            }
+            url = data["@odata.nextLink"] || null;
+          }
+        }
+
+        const norm = normalizeBasePath(basePath);
+        let startUrl;
+        if (norm === "") {
+          startUrl = "https://graph.microsoft.com/v1.0/me/drive/root/children";
+          log("OneDrive 루트에서 시작");
+        } else {
+          startUrl =
+            "https://graph.microsoft.com/v1.0/me/drive/root:" +
+            encodeURI(norm) +
+            ":/children";
+          log("OneDrive 경로에서 시작: " + norm);
+        }
+
+        await walkFolder(startUrl, "");
+        return { files, folders };
+      }
+
+      // ===== 로컬 폴더 스캔 =====
+
+      async function* walkDir(dirHandle, prefix) {
+        prefix = prefix || "";
+        for await (const entry of dirHandle.entries()) {
+          const name = entry[0];
+          const handle = entry[1];
+          const path = prefix ? prefix + "/" + name : name;
+          if (handle.kind === "file") {
+            yield { path, handle };
+          } else if (handle.kind === "directory") {
+            for await (const item of walkDir(handle, path)) {
+              yield item;
+            }
+          }
+        }
+      }
+
+      async function buildLocalMap(rootHandle) {
+        const map = new Map();
+        for await (const item of walkDir(rootHandle, "")) {
+          const file = await item.handle.getFile();
+          map.set(item.path, {
+            handle: item.handle,
+            size: file.size,
+            mtime: file.lastModified
+          });
+        }
+        return map;
+      }
+
+      async function ensureLocalDir(rootHandle, pathParts) {
+        let dir = rootHandle;
+        for (let i = 0; i < pathParts.length; i++) {
+          const part = pathParts[i];
+          if (!part) continue;
+          dir = await dir.getDirectoryHandle(part, { create: true });
+        }
+        return dir;
+      }
+
+      async function getLocalDir(rootHandle, pathParts) {
+        let dir = rootHandle;
+        for (let i = 0; i < pathParts.length; i++) {
+          const part = pathParts[i];
+          if (!part) continue;
+          dir = await dir.getDirectoryHandle(part);
+        }
+        return dir;
+      }
+
+      // ===== 원격 폴더 생성 (업로드용) =====
+
+      async function ensureRemoteFolderTree(basePath, relFolderPath, remoteFolders) {
+        const normBase = normalizeBasePath(basePath);
+        const parts = relFolderPath ? relFolderPath.split("/") : [];
+        let currentRel = "";
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          if (!part) continue;
+          currentRel = currentRel ? currentRel + "/" + part : part;
+          if (remoteFolders.has(currentRel)) continue;
+
+          const parentRel =
+            currentRel.indexOf("/") >= 0
+              ? currentRel.slice(0, currentRel.lastIndexOf("/"))
+              : "";
+          const parentFullPath = parentRel
+            ? buildItemFullPath(normBase, parentRel)
+            : normBase || "";
+
+          let childrenUrl;
+          if (!parentFullPath) {
+            childrenUrl =
+              "https://graph.microsoft.com/v1.0/me/drive/root/children";
+          } else {
+            childrenUrl =
+              "https://graph.microsoft.com/v1.0/me/drive/root:" +
+              encodeURI(parentFullPath) +
+              ":/children";
+          }
+
+          const token = await acquireGraphToken();
+          const res = await fetch(childrenUrl, {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer " + token,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              name: part,
+              folder: {},
+              "@microsoft.graph.conflictBehavior": "fail"
+            })
+          });
+          if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(
+              "원격 폴더 생성 실패: " +
+                currentRel +
+                " - " +
+                res.status +
+                " " +
+                txt
+            );
+          }
+          const data = await res.json();
+          remoteFolders.set(currentRel, data.id);
+          log("원격 폴더 생성: " + currentRel);
+        }
+      }
+
+      // ===== 업로드 세션 기반 파일 업로드 =====
+
+      async function uploadFileWithSession(file, relPath, basePath, conflictBehavior) {
+        const fullPath = buildItemFullPath(basePath, relPath);
+        const sessionUrl =
+          "https://graph.microsoft.com/v1.0/me/drive/root:" +
+          encodeURI(fullPath) +
+          ":/createUploadSession";
+
+        const fileName = relPath.split("/").pop();
+        const token = await acquireGraphToken();
+
+        const sessionRes = await fetch(sessionUrl, {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + token,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            item: {
+              "@microsoft.graph.conflictBehavior": conflictBehavior,
+              name: fileName
+            }
+          })
+        });
+
+        if (!sessionRes.ok) {
+          const t = await sessionRes.text();
+          throw new Error(
+            "업로드 세션 생성 실패: " + sessionRes.status + " " + t
+          );
+        }
+
+        const session = await sessionRes.json();
+        const uploadUrl = session.uploadUrl;
+        const chunkSize = 4 * 1024 * 1024; // 4MB
+        const totalSize = file.size;
+        let start = 0;
+
+        while (start < totalSize) {
+          const end = Math.min(start + chunkSize, totalSize);
+          const chunk = file.slice(start, end);
+          const contentRange =
+            "bytes " + start + "-" + (end - 1) + "/" + totalSize;
+
+          const res = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: {
+              "Content-Length": String(chunk.size),
+              "Content-Range": contentRange
+            },
+            body: chunk
+          });
+
+          if (![200, 201, 202].includes(res.status)) {
+            const t = await res.text();
+            throw new Error("업로드 세션 오류: " + res.status + " " + t);
+          }
+
+          start = end;
+        }
+      }
+
+      // ===== 다운로드 모드 분석 & 실행 =====
+
+      async function analyzeDownload() {
+        if (!localRootHandle) {
+          alert("로컬 대상 폴더를 먼저 선택하세요.");
+          return;
+        }
+
+        const basePath = remoteBaseInput.value;
+        log("다운로드 모드: OneDrive / 로컬 파일맵 생성 중...");
+
+        const [{ files: remoteMap }, localMap] = await Promise.all([
+          buildRemoteMaps(basePath),
+          buildLocalMap(localRootHandle)
+        ]);
+
+        log(
+          "OneDrive 파일 수: " +
+            remoteMap.size +
+            ", 로컬 파일 수: " +
+            localMap.size
+        );
+
+        const toDownload = [];
+        const toDelete = [];
+
+        remoteMap.forEach((rInfo, path) => {
+          const lInfo = localMap.get(path);
+          if (!lInfo) {
+            toDownload.push(path);
+          } else {
+            const sizeDiff = rInfo.size !== lInfo.size;
+            const timeDiff = Math.abs(rInfo.mtime - lInfo.mtime) > 2000;
+            if (sizeDiff || timeDiff) {
+              toDownload.push(path);
+            }
+          }
+        });
+
+        if (mirrorDelete.checked) {
+          localMap.forEach((lInfo, path) => {
+            if (!remoteMap.has(path)) {
+              toDelete.push(path);
+            }
+          });
+        }
+
+        syncPlan = {
+          direction: "download",
+          remoteMap,
+          localMap,
+          toDownload,
+          toDelete
+        };
+
+        log(
+          "분석 완료 (다운로드). 다운로드 " +
+            toDownload.length +
+            "개, 로컬 삭제 " +
+            toDelete.length +
+            "개 예정."
+        );
+
+        if (toDownload.length === 0 && toDelete.length === 0) {
+          log("동기화할 변경사항이 없습니다.");
+          syncBtn.disabled = true;
+        } else {
+          syncBtn.disabled = false;
+        }
+      }
+
+      async function runDownloadSync() {
+        const { toDownload, toDelete, remoteMap, localMap } = syncPlan;
+        const confirmText =
+          "다운로드 " +
+          toDownload.length +
+          "개, 로컬 삭제 " +
+          toDelete.length +
+          "개를 실행할까요?";
+        if (!confirm(confirmText)) {
+          log("사용자가 다운로드 동기화를 취소했습니다.");
+          return;
+        }
+
+        log("다운로드 동기화 시작 (OneDrive → 로컬)...");
+
+        // 다운로드
+        for (let i = 0; i < toDownload.length; i++) {
+          const path = toDownload[i];
+          try {
+            const info = remoteMap.get(path);
+            if (!info) continue;
+
+            const url =
+              "https://graph.microsoft.com/v1.0/me/drive/items/" +
+              encodeURIComponent(info.id) +
+              "/content";
+
+            const token = await acquireGraphToken();
+            const res = await fetch(url, {
+              headers: { Authorization: "Bearer " + token }
+            });
+            if (!res.ok) {
+              const t = await res.text();
+              throw new Error("다운로드 실패: " + res.status + " " + t);
+            }
+            const blob = await res.blob();
+
+            const parts = path.split("/");
+            const fileName = parts.pop();
+            const dir = await ensureLocalDir(localRootHandle, parts);
+            const fileHandle = await dir.getFileHandle(fileName, {
+              create: true
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+
+            log("다운로드 완료: " + path);
+          } catch (e) {
+            log("다운로드 오류: " + path + " - " + e.message);
+          }
+        }
+
+        // 로컬 삭제
+        for (let j = 0; j < toDelete.length; j++) {
+          const pathDel = toDelete[j];
+          try {
+            const parts2 = pathDel.split("/");
+            const fileName2 = parts2.pop();
+            const dir2 = await getLocalDir(localRootHandle, parts2);
+            await dir2.removeEntry(fileName2);
+            log("로컬 삭제: " + pathDel);
+          } catch (e) {
+            log("로컬 삭제 오류: " + pathDel + " - " + e.message);
+          }
+        }
+
+        log("다운로드 동기화 완료.");
+        syncBtn.disabled = true;
+      }
+
+      // ===== 업로드 모드 분석 & 실행 =====
+
+      async function analyzeUpload() {
+        if (!localRootHandle) {
+          alert("로컬 기준 폴더를 먼저 선택하세요.");
+          return;
+        }
+
+        const basePath = remoteBaseInput.value;
+        const conflictPolicy = conflictPolicySelect.value;
+
+        log("업로드 모드: OneDrive / 로컬 파일맵 생성 중...");
+
+        const [{ files: remoteMap, folders: remoteFolders }, localMap] =
+          await Promise.all([buildRemoteMaps(basePath), buildLocalMap(localRootHandle)]);
+
+        log(
+          "OneDrive 파일 수: " +
+            remoteMap.size +
+            ", 로컬 파일 수: " +
+            localMap.size
+        );
+
+        const toUpload = [];
+        const skippedConflicts = [];
+
+        localMap.forEach((lInfo, path) => {
+          const rInfo = remoteMap.get(path);
+          if (!rInfo) {
+            // 원격에 없는 새 파일 → 무조건 업로드
+            toUpload.push({ path, behavior: "new" });
+          } else {
+            const sizeDiff = lInfo.size !== rInfo.size;
+            const timeDiff = Math.abs(lInfo.mtime - rInfo.mtime) > 2000;
+            if (!sizeDiff && !timeDiff) return; // 동일 파일
+
+            if (conflictPolicy === "replace" || conflictPolicy === "rename") {
+              toUpload.push({ path, behavior: conflictPolicy });
+            } else {
+              // open 정책: 충돌 나는 파일은 건너뜀
+              skippedConflicts.push(path);
+            }
+          }
+        });
+
+        syncPlan = {
+          direction: "upload",
+          remoteMap,
+          remoteFolders,
+          localMap,
+          toUpload,
+          skippedConflicts,
+          conflictPolicy
+        };
+
+        log(
+          "분석 완료 (업로드). 업로드 " +
+            toUpload.length +
+            "개, 충돌로 건너뛴 파일 " +
+            skippedConflicts.length +
+            "개."
+        );
+
+        if (toUpload.length === 0) {
+          log("업로드할 변경사항이 없습니다.");
+          syncBtn.disabled = true;
+        } else {
+          syncBtn.disabled = false;
+        }
+
+        if (skippedConflicts.length > 0) {
+          log(
+            "open 정책으로 건너뛴 파일 예시: " +
+              skippedConflicts.slice(0, 5).join(", ") +
+              (skippedConflicts.length > 5 ? " ..." : "")
+          );
+        }
+      }
+
+      async function runUploadSync() {
+        const { toUpload, skippedConflicts, remoteFolders, localMap, conflictPolicy } =
+          syncPlan;
+        const basePath = remoteBaseInput.value;
+
+        const confirmText =
+          "업로드 " +
+          toUpload.length +
+          "개 (정책: " +
+          conflictPolicy +
+          "), 충돌 건너뛴 " +
+          skippedConflicts.length +
+          "개. 실행할까요?";
+        if (!confirm(confirmText)) {
+          log("사용자가 업로드 동기화를 취소했습니다.");
+          return;
+        }
+
+        log("업로드 동기화 시작 (로컬 → OneDrive)...");
+
+        for (let i = 0; i < toUpload.length; i++) {
+          const item = toUpload[i];
+          const path = item.path;
+          const behavior = item.behavior;
+
+          try {
+            const parts = path.split("/");
+            const fileName = parts.pop();
+            const relFolder = parts.join("/");
+
+            // 원격 폴더 트리 보장
+            await ensureRemoteFolderTree(basePath, relFolder, remoteFolders);
+
+            const lInfo = localMap.get(path);
+            if (!lInfo) {
+              log("로컬에서 파일을 찾을 수 없음 (건너뜀): " + path);
+              continue;
+            }
+            const file = await lInfo.handle.getFile();
+
+            let conflictBehavior;
+            if (behavior === "replace") conflictBehavior = "replace";
+            else if (behavior === "rename") conflictBehavior = "rename";
+            else conflictBehavior = "fail"; // new 파일: 사실상 큰 의미 없음
+
+            await uploadFileWithSession(
+              file,
+              path,
+              basePath,
+              conflictBehavior
+            );
+
+            log("업로드 완료: " + path);
+          } catch (e) {
+            log("업로드 오류: " + path + " - " + e.message);
+          }
+        }
+
+        log("업로드 동기화 완료.");
+        syncBtn.disabled = true;
+      }
+
+      // ===== 공통 analyze / sync 스위치 =====
+
+      async function analyze() {
+        const mode = document.querySelector('input[name="mode"]:checked').value;
+        syncBtn.disabled = true;
+        if (mode === "download") {
+          await analyzeDownload();
+        } else {
+          await analyzeUpload();
+        }
+      }
+
+      async function runSync() {
+        if (!syncPlan) {
+          alert("먼저 '변경사항 분석'을 실행하세요.");
+          return;
+        }
+        if (syncPlan.direction === "download") {
+          await runDownloadSync();
+        } else {
+          await runUploadSync();
+        }
+      }
+
+      // ===== UI 이벤트 바인딩 =====
+
+      document
+        .getElementById("loginBtn")
+        .addEventListener("click", async () => {
+          try {
+            await ensureLogin();
+          } catch (e) {
+            log("로그인 실패: " + e.message);
+          }
+        });
+
+      document
+        .getElementById("pickLocal")
+        .addEventListener("click", async () => {
+          try {
+            localRootHandle = await window.showDirectoryPicker({
+              mode: "readwrite"
+            });
+            localPathSpan.textContent = localRootHandle.name;
+            log("로컬 기준 폴더 선택: " + localRootHandle.name);
+          } catch (e) {
+            log("로컬 폴더 선택 취소/오류: " + e.message);
+          }
+        });
+
+      analyzeBtn.addEventListener("click", async () => {
+        try {
+          await analyze();
+        } catch (e) {
+          log("분석 중 오류: " + e.message);
+        }
+      });
+
+      syncBtn.addEventListener("click", async () => {
+        try {
+          await runSync();
+        } catch (e) {
+          log("동기화 중 오류: " + e.message);
+        }
+      });
+
+      // 모드 전환시 옵션 토글
+      document.querySelectorAll('input[name="mode"]').forEach((radio) => {
+        radio.addEventListener("change", () => {
+          const mode = document.querySelector(
+            'input[name="mode"]:checked'
+          ).value;
+          if (mode === "download") {
+            downloadOptions.style.display = "";
+            uploadOptions.style.display = "none";
+          } else {
+            downloadOptions.style.display = "none";
+            uploadOptions.style.display = "";
+          }
+          syncPlan = null;
+          syncBtn.disabled = true;
+        });
+      });
+
+      log("페이지 로드 완료. 먼저 Microsoft 로그인을 권장합니다.");
+    })();
+  </script>
+</body>
+</html>
