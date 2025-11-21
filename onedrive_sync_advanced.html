@@ -510,11 +510,11 @@
         remoteMap.forEach((rInfo, path) => {
           const lInfo = localMap.get(path);
           if (!lInfo) {
+            // 로컬에 파일이 없으면 무조건 다운로드
             toDownload.push(path);
           } else {
-            const sizeDiff = rInfo.size !== lInfo.size;
-            const timeDiff = Math.abs(rInfo.mtime - lInfo.mtime) > 2000;
-            if (sizeDiff || timeDiff) {
+            // 이름(경로) 같고, 크기까지 같으면 ‘동일’로 보고 건너뜀
+            if (rInfo.size !== lInfo.size) {
               toDownload.push(path);
             }
           }
@@ -853,4 +853,5 @@
   </script>
 </body>
 </html>
+
 
