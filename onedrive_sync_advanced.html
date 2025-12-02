@@ -565,11 +565,21 @@
           return;
         }
 
-        log("다운로드 동기화 시작 (OneDrive → 로컬)...");
+        const totalDownload = toDownload.length;
+        const totalDelete = toDelete.length;
+      
+        log(
+          "다운로드 동기화 시작 (OneDrive → 로컬) - 다운로드 " +
+            totalDownload +
+            "개, 로컬 삭제 " +
+            totalDelete +
+            "개."
+        );
 
         // 다운로드
         for (let i = 0; i < toDownload.length; i++) {
           const path = toDownload[i];
+          const prefix = "(" + (i + 1) + "/" + totalDownload + ") ";
           try {
             const info = remoteMap.get(path);
             if (!info) continue;
@@ -608,6 +618,7 @@
         // 로컬 삭제
         for (let j = 0; j < toDelete.length; j++) {
           const pathDel = toDelete[j];
+          const prefixDel = "(" + (j + 1) + "/" + totalDelete + ") ";
           try {
             const parts2 = pathDel.split("/");
             const fileName2 = parts2.pop();
@@ -707,6 +718,8 @@
           syncPlan;
         const basePath = remoteBaseInput.value;
 
+        const totalUpload = toUpload.length;
+
         const confirmText =
           "업로드 " +
           toUpload.length +
@@ -720,12 +733,19 @@
           return;
         }
 
-        log("업로드 동기화 시작 (로컬 → OneDrive)...");
+        log(
+          "업로드 동기화 시작 (로컬 → OneDrive) - 업로드 " +
+            totalUpload +
+            "개, 충돌 건너뜀 " +
+            skippedConflicts.length +
+            "개."
+        );
 
         for (let i = 0; i < toUpload.length; i++) {
           const item = toUpload[i];
           const path = item.path;
           const behavior = item.behavior;
+          const prefix = "(" + (i + 1) + "/" + totalUpload + ") ";
 
           try {
             const parts = path.split("/");
@@ -853,5 +873,6 @@
   </script>
 </body>
 </html>
+
 
 
