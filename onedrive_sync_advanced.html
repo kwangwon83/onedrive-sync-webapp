@@ -662,20 +662,31 @@
 
         localMap.forEach((lInfo, path) => {
           const rInfo = remoteMap.get(path);
-          if (!rInfo) {
-            // 원격에 없는 새 파일 → 무조건 업로드
-            toUpload.push({ path, behavior: "new" });
-          } else {
-            const sizeDiff = lInfo.size !== rInfo.size;
-            const timeDiff = Math.abs(lInfo.mtime - rInfo.mtime) > 2000;
-            if (!sizeDiff && !timeDiff) return; // 동일 파일
 
-            if (conflictPolicy === "replace" || conflictPolicy === "rename") {
-              toUpload.push({ path, behavior: conflictPolicy });
-            } else {
-              // open 정책: 충돌 나는 파일은 건너뜀
-              skippedConflicts.push(path);
-            }
+          // 1) 원격에 없는 파일 → 새 파일 (정책과 무관하게 항상 업로드)
+          if (!rInfo) {
+            toUpload.push({ path, behavior: "new" });
+            return;
+          }
+          
+          // 2) 원격에 이미 있는 파일 → "크기만" 비교
+          const sizeDiff = lInfo.size !== rInfo.size;
+
+          // 크기가 같으면 동일 파일로 간주 → 업로드할 필요 없음
+          if (!sizeDiff) {
+            return;
+          }
+
+          // 크기가 다르면 "내용이 다른 파일(충돌/변경)"로 간주
+          if (conflictPolicy === "replace") {
+            // Replace: 크기만 다르면 무조건 원격 덮어쓰기
+            toUpload.push({ path, behavior: "replace" });
+          } else if (conflictPolicy === "rename") {
+            // Rename: 크기 다르면 새 이름으로 업로드
+            toUpload.push({ path, behavior: "rename" });
+          } else {
+            // Open: 크기 다른 파일은 건너뜀 (나중에 수동 확인용 목록만 저장)
+            skippedConflicts.push(path);
           }
         });
 
@@ -873,6 +884,7 @@
   </script>
 </body>
 </html>
+
 
 
 
