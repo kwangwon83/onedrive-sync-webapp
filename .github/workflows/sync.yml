@@ -2,22 +2,24 @@ name: OneDrive to GitHub Sync
 
 on:
   schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+    - cron: '0 * * * *'  # 매시간 정각에 자동으로 실행하옵니다.
+  workflow_dispatch:      # 전하께서 원하실 때 언제든 수동으로 실행 가능하옵니다.
 
-# 👑 1. 파발마에게 창고(Repository)의 '쓰기 권한'을 명시적으로 하사하옵니다.
+# 파발마에게 창고를 수정할 수 있는 권한을 하사하옵니다.
 permissions:
   contents: write
+
+# 구형 수레바퀴(Node 20) 경고를 잠재우는 설정이옵니다.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      # 👑 2. 낡은 도구를 새것(@v4)으로 교체하옵니다. (Node 경고 파훼)
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 👑 3. 파이썬 도구 역시 최신(@v5)으로 교체하옵니다. (Node 경고 파훼)
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -37,12 +39,11 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
+          git add content/  # 오직 content 폴더의 변화만 기록하옵니다.
           
-          # 👑 4. 변경된 지식이 있을 때만 전송하도록 영리하게 명하옵니다. (128 에러 파훼)
           if git diff-index --quiet HEAD --; then
-            echo "변경된 지식이 없어 전송을 생략하옵니다."
+            echo "새로 징발할 지식이 없어 작업을 마칩니다."
           else
-            git commit -m "Auto-sync from OneDrive"
+            git commit -m "Auto-sync from OneDrive to content folder"
             git push
           fi
