@@ -1,10 +1,17 @@
-# sync.py의 핵심 API 호출 예시 (MSAL 라이브러리 사용)
-# Application Permission을 사용할 때는 /users/{사용자 계정} 경로를 사용해야 해.
+import urllib.parse
+import requests
 
-USER_EMAIL = "너의_마이크로소프트_계정@도메인.com"
-FOLDER_PATH = "Notes" # 동기화할 OneDrive 폴더 이름
+USER_EMAIL = "seokwangwon@hotmail.com"
 
-# MS Graph API 엔드포인트
-endpoint = f"https://graph.microsoft.com/v1.0/users/{USER_EMAIL}/drive/root:/{FOLDER_PATH}:/children"
+# 1. 맨 끝의 슬래시(/)를 제거한 경로
+FOLDER_PATH = "Apps/remotely-save/MyVault/2. AREA/Report - Industry"
 
-# 이후 부여받은 토큰(access_token)을 헤더에 담아 위 endpoint로 요청을 보내어 파일을 다운로드하는 로직 작성
+# 2. 경로에 포함된 띄어쓰기나 특수기호를 웹 주소용으로 안전하게 변환 (URL 인코딩)
+encoded_path = urllib.parse.quote(FOLDER_PATH)
+
+# 3. 최종 API 호출 주소 생성
+endpoint = f"https://graph.microsoft.com/v1.0/users/{USER_EMAIL}/drive/root:/{encoded_path}:/children"
+
+# (참고) 이후 토큰을 헤더에 담아 호출하는 부분
+# headers = {"Authorization": f"Bearer {access_token}"}
+# response = requests.get(endpoint, headers=headers)
