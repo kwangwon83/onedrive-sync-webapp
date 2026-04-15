@@ -2,18 +2,24 @@ name: OneDrive to GitHub Sync
 
 on:
   schedule:
-    - cron: '0 * * * *' # 매시간 정각에 실행 (원하는 주기로 변경 가능)
-  workflow_dispatch: # 수동 실행 버튼 활성화
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+# 👑 1. 파발마에게 창고(Repository)의 '쓰기 권한'을 명시적으로 하사하옵니다.
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # 👑 2. 낡은 도구를 새것(@v4)으로 교체하옵니다. (Node 경고 파훼)
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
+      # 👑 3. 파이썬 도구 역시 최신(@v5)으로 교체하옵니다. (Node 경고 파훼)
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -32,5 +38,11 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Auto-sync from OneDrive" || echo "No changes to commit"
-          git push
+          
+          # 👑 4. 변경된 지식이 있을 때만 전송하도록 영리하게 명하옵니다. (128 에러 파훼)
+          if git diff-index --quiet HEAD --; then
+            echo "변경된 지식이 없어 전송을 생략하옵니다."
+          else
+            git commit -m "Auto-sync from OneDrive"
+            git push
+          fi
